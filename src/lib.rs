@@ -79,7 +79,7 @@
 //!     },
 //! ]
 //! ```
-#![feature(cstr_from_bytes_until_nul)]
+//#![feature(cstr_from_bytes_until_nul)]
 use std::ffi::{CStr};
 use std::fmt::{Debug};
 use std::os::raw::c_ulong;
