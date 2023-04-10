@@ -79,11 +79,12 @@
 //!     },
 //! ]
 //! ```
-
-use std::ffi::CStr;
-use std::fmt::Debug;
+#![feature(cstr_from_bytes_until_nul)]
+use std::ffi::{CStr};
+use std::fmt::{Debug};
 use std::os::raw::c_ulong;
 use std::{ptr, slice};
+use std::convert::TryFrom;
 
 pub use indexmap;
 #[cfg(feature = "serialize")]
@@ -135,6 +136,7 @@ impl XHandle {
                     is_automatic: real_bool(sys.automatic),
                     x: sys.x,
                     y: sys.y,
+                    rotate: 1,
                     width_px: sys.width,
                     height_px: sys.height,
                     width_mm: sys.mwidth,
@@ -149,6 +151,119 @@ impl XHandle {
         }
 
         Ok(list)
+    }
+
+    pub fn set_monitor(&mut self, monitor: & mut Monitor, refresh: f64) -> Result<(), XrandrError> {
+
+        let _mode_info = self.get_mode_info(monitor)?;
+        let best_mode_id = self.find_best_mode(monitor.width_px, monitor.height_px, refresh)?;
+
+        let res_ptr = unsafe{ xrandr::XRRGetScreenResources(self.sys.as_ptr(), self.root()) };
+
+        let crtc = monitor.outputs[0].crtc;
+        let crtc_info = unsafe{ xrandr::XRRGetCrtcInfo(self.sys.as_ptr(), res_ptr, crtc) };
+        let crtc_ref = unsafe{ &(*crtc_info) };
+
+        let _best_mode_info = self.get_mode_info_by_id(best_mode_id);
+        let _crtc_mode_info = self.get_mode_info_by_id(crtc_ref.mode);
+
+        // dbg!(best_mode_info);
+        // dbg!(crtc_mode_info);
+        //
+        // dbg!(best_mode_id);
+        // dbg!(crtc_ref.mode);
+        unsafe{ xrandr::XRRSetCrtcConfig(self.sys.as_ptr(), res_ptr, crtc,
+                                         crtc_ref.timestamp, monitor.x, monitor.y,
+                                        best_mode_id,
+                                        //crtc_ref.mode,
+                                        monitor.rotate, crtc_ref.outputs,
+                                        crtc_ref.noutput); }
+
+        unsafe{ xrandr::XRRFreeScreenResources( res_ptr.cast()) ; }
+        drop(res_ptr);
+
+        drop(crtc_ref);
+        unsafe{ xrandr::XRRFreeCrtcInfo(crtc_info.cast()); }
+        drop(crtc_info);
+
+        Ok(())
+    }
+
+    pub fn get_mode_info(&mut self, monitor: & Monitor) -> Result<ModeInfo, XrandrError> {
+         let mode_id = monitor.get_mode_id();
+         let mode_info =  self.get_mode_info_by_id(mode_id);
+
+         mode_info
+    }
+
+    pub fn get_mode_info_by_id(&mut self, mode_id: u64) -> Result<ModeInfo, XrandrError> {
+        let res_ptr = unsafe{ xrandr::XRRGetScreenResources(self.sys.as_ptr(), self.root()) };
+        let res = unsafe{ &*res_ptr };
+
+        let num_modes = usize::try_from(res.nmode).unwrap();
+
+        let mut found_node: Option<ModeInfo> = None;
+
+        for mode_index in 0..num_modes {
+            let mode_ptr = unsafe{ res.modes.add(mode_index) };
+            let mode = unsafe{ &*mode_ptr };
+
+            if mode.id == mode_id {
+                found_node = Some(ModeInfo::from_xrr_mode_info(mode));
+                break;
+            }
+        }
+
+        drop(res);
+        unsafe{ xrandr::XRRFreeScreenResources( res_ptr.cast()) ; }
+        drop(res_ptr);
+
+        found_node.ok_or(XrandrError::GetModeById(mode_id))
+    }
+
+    /// returns mode id for best mode
+    /// has to have correct resolution, and nearest refresh rate.
+    pub fn find_best_mode(&mut self, width: i32, height: i32, refresh: f64) -> Result<u64, XrandrError> {
+        let res_ptr = unsafe{ xrandr::XRRGetScreenResources(self.sys.as_ptr(), self.root()) };
+        let res = unsafe{ &*res_ptr };
+
+        let num_modes = usize::try_from(res.nmode).unwrap();
+
+        let mut best_mode: Option<u64> = None;
+        let mut best_dist = 1e100;
+        let mut _best_mode_info = unsafe{ &* res.modes };
+
+        for mode_index in 0..num_modes {
+            let mode_ptr = unsafe{ res.modes.add(mode_index) };
+            let mode = unsafe{ &*mode_ptr };
+
+            let check_mode = ModeInfo::from_xrr_mode_info(mode);
+
+            let dist = f64::abs(check_mode.refresh() - refresh);
+
+            if check_mode.width == u32::try_from(width).unwrap() && check_mode.height == u32::try_from(height).unwrap() {
+
+                println!("mod_id={}\trefresh={} wanted={}", check_mode.id, check_mode.refresh(), refresh);
+
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_mode = Some(check_mode.id);
+                    _best_mode_info = mode;
+                }
+            }
+        }
+
+        drop(res);
+        unsafe{ xrandr::XRRFreeScreenResources( res_ptr.cast()) ; }
+        drop(res_ptr);
+
+        dbg!(best_mode);
+        best_mode.ok_or(XrandrError::FindBestMode(width, height, refresh))
+    }
+
+    pub fn set_screen_size(&mut self, width: i32, height: i32, width_mm: i32, height_mm: i32) {
+        unsafe{ xrandr::XRRSetScreenSize(self.sys.as_ptr(), self.root(), width, height,
+                height_mm, width_mm); }
     }
 
     /// List every monitor's outputs
@@ -197,9 +312,134 @@ pub struct Monitor {
     pub height_px: i32,
     pub width_mm: i32,
     pub height_mm: i32,
+    pub rotate: u16,
     /// An Output describes an actual physical monitor or display. A [`Monitor`]
     /// can have more than one output.
     pub outputs: Vec<Output>,
+}
+
+impl Monitor {
+    pub fn to_rr_monitor_info(&self, name_atom: c_ulong, rr_mon_info: * mut xrandr::XRRMonitorInfo) {
+        let mut out_ref = unsafe{ &mut *rr_mon_info };
+
+        out_ref.name = name_atom;
+        out_ref.primary = xlib::Bool::from(self.is_primary);
+        out_ref.automatic = xlib::Bool::from(self.is_automatic);
+        out_ref.noutput = i32::try_from(self.outputs.len()).unwrap();
+        out_ref.x = self.x;
+        out_ref.y = self.y;
+        out_ref.width = self.width_px;
+        out_ref.height = self.height_px;
+        out_ref.mwidth = self.width_mm;
+        out_ref.mheight = self.height_mm;
+
+        for (i, output) in self.outputs.iter().enumerate() {
+            unsafe{ *(out_ref.outputs.add(i)) = output.xid }
+        }
+    }
+
+    pub fn get_rotate(&self) -> xrandr::Rotation {
+        let mut xh = XHandle::open().unwrap();
+
+        let res = unsafe{ xrandr::XRRGetScreenResources(xh.sys.as_ptr(), xh.root()) };
+
+        let crtc = self.outputs[0].crtc;
+
+        let crtc_info = unsafe{ xrandr::XRRGetCrtcInfo(xh.sys.as_ptr(), res, crtc) };
+
+        let crtc_ref = unsafe{ &(*crtc_info) };
+
+        let rotate = crtc_ref.rotations;
+
+        unsafe{ xrandr::XRRFreeCrtcInfo(crtc_info.cast()); }
+
+        unsafe{ xrandr::XRRFreeScreenResources( res.cast()) ; }
+
+        rotate
+
+    }
+
+    pub fn get_mode_id(&self) -> u64 {
+
+        let mut xh = XHandle::open().unwrap();
+        let res = unsafe{ xrandr::XRRGetScreenResources(xh.sys.as_ptr(), xh.root()) };
+
+        let crtc = self.outputs[0].crtc;
+        let crtc_info = unsafe{ xrandr::XRRGetCrtcInfo(xh.sys.as_ptr(), res, crtc) };
+        let crtc_ref = unsafe{ &(*crtc_info) };
+
+        let mode_id = crtc_ref.mode;
+
+        drop(crtc_ref);
+        unsafe{ xrandr::XRRFreeCrtcInfo(crtc_info.cast()); }
+        drop(crtc_info);
+
+        unsafe{ xrandr::XRRFreeScreenResources( res.cast()) ; }
+        drop(res);
+
+        mode_id
+    }
+
+}
+
+#[derive(Debug)]
+pub struct ModeInfo {
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    pub dot_clock: u64,
+    pub h_sync_start: u32,
+    pub h_sync_end: u32,
+    pub h_total: u32,
+    pub h_skew: u32,
+    pub v_sync_start: u32,
+    pub v_sync_end: u32,
+    pub v_total: u32,
+    pub name: String,
+    pub mode_flags: u64,
+}
+
+impl ModeInfo {
+    pub fn from_xrr_mode_info(other: * const xrandr::XRRModeInfo) -> ModeInfo {
+
+        let p = unsafe{ &*other };
+
+        let name: String = String::new();
+
+        ModeInfo {
+            id: p.id,
+            width: p.width,
+            height: p.height,
+            dot_clock: p.dotClock,
+            h_sync_start: p.hSyncStart,
+            h_sync_end: p.hSyncEnd,
+            h_total: p.hTotal,
+            h_skew: p.hSkew,
+            v_sync_start: p.vSyncStart,
+            v_sync_end: p.vSyncEnd,
+            v_total: p.vTotal,
+            name: name.clone(),
+            mode_flags: p.modeFlags,
+        }
+
+    }
+
+    pub fn refresh(& self) -> f64 {
+
+        let clock: f64 = self.dot_clock as f64;
+        let mut vert: f64 = self.v_total as f64;
+        let horiz: f64 = f64::try_from(self.h_total).unwrap();
+
+        if (self.mode_flags & u64::try_from(xrandr::RR_Interlace).unwrap()) != 0 {
+            vert = vert / 2.0;
+        }
+
+        if (self.mode_flags & u64::try_from(xrandr::RR_DoubleScan).unwrap()) != 0 {
+            vert = vert * 2.0;
+        }
+
+        clock / (vert * horiz)
+    }
 }
 
 fn real_bool(sys: xlib::Bool) -> bool {
@@ -234,8 +474,12 @@ pub enum XrandrError {
     GetOutputInfo(xlib::XID),
     #[error("Failed to get the properties of output with xid {0}")]
     GetOutputProp(xlib::XID),
-    #[error("Failed to name of atom {0}")]
+    #[error("Failed to find name of atom {0}")]
     GetAtomName(xlib::Atom),
+    #[error("Failed to get mode from id {0}")]
+    GetModeById(u64),
+    #[error("Failed to find mode for {0} x {1}, {2} fps")]
+    FindBestMode(i32, i32, f64),
 }
 
 #[cfg(test)]

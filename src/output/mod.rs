@@ -13,6 +13,7 @@ use x11::{xlib, xrandr};
 #[cfg_attr(feature = "serialize", derive(Serialize, Deserialize))]
 pub struct Output {
     pub xid: u64,
+    pub crtc: u64,
     pub name: String,
     /// Properties by name
     pub properties: IndexMap<String, Property>,
@@ -49,12 +50,15 @@ impl Output {
 
         let properties = Self::get_props(handle, xid)?;
 
+        let crtc = info.crtc;
+
         unsafe {
             xrandr::XRRFreeOutputInfo(info as *const _ as *mut _);
         }
 
         Ok(Self {
             xid,
+            crtc,
             name,
             properties,
         })
