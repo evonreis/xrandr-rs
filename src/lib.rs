@@ -167,11 +167,6 @@ impl XHandle {
         let _best_mode_info = self.get_mode_info_by_id(best_mode_id);
         let _crtc_mode_info = self.get_mode_info_by_id(crtc_ref.mode);
 
-        // dbg!(best_mode_info);
-        // dbg!(crtc_mode_info);
-        //
-        // dbg!(best_mode_id);
-        // dbg!(crtc_ref.mode);
         unsafe{ xrandr::XRRSetCrtcConfig(self.sys.as_ptr(), res_ptr, crtc,
                                          crtc_ref.timestamp, monitor.x, monitor.y,
                                         best_mode_id,
@@ -257,7 +252,6 @@ impl XHandle {
         unsafe{ xrandr::XRRFreeScreenResources( res_ptr.cast()) ; }
         drop(res_ptr);
 
-        dbg!(best_mode);
         best_mode.ok_or(XrandrError::FindBestMode(width, height, refresh))
     }
 
