@@ -119,7 +119,7 @@ impl XHandle {
         let mut count = 0;
         let infos =
             unsafe { xrandr::XRRGetMonitors(self.sys.as_ptr(), self.root(), 0, &mut count) };
-        if infos.is_null() && count == -1 {
+        if infos.is_null() || count == -1 {
             return Err(XrandrError::GetMonitors);
         }
         let count = count as usize;
